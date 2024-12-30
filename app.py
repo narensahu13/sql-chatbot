@@ -8,6 +8,7 @@ import yaml
 import re
 import plotly.express as px
 import os
+from dotenv import load_dotenv
 
 # Page config
 st.set_page_config(page_title="Database Query Assistant", layout="wide")
@@ -21,10 +22,9 @@ if 'messages' not in st.session_state:
     st.session_state.messages = []
 
 def load_credentials():
-    """Load OpenAI API key from credentials.yml"""
-    with open('credentials.yml', 'r') as file:
-        credentials = yaml.safe_load(file)
-        os.environ["OPENAI_API_KEY"] = credentials['openai']
+    """Load OpenAI API key from .env file"""
+    load_dotenv()
+    os.environ["OPENAI_API_KEY"] = os.getenv('OPENAI_API_KEY')
     return ChatOpenAI(model="gpt-4o-mini")
 
 def extract_sql_code(response):
