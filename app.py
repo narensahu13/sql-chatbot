@@ -176,51 +176,52 @@ def main():
             # Add user message to chat
             st.session_state.messages.append({"role": "user", "content": prompt})
             
-            # Process the question
-            try:
-                # Create database utility
-                db = SQLDatabase.from_uri(st.session_state.db_connection.url)
-                sql_generator = create_sql_query_chain(llm=llm, db=db, k=int(1e7))
-                
-                # Generate SQL query
-                sql_response = sql_generator.invoke({"question": prompt})
-                if sql_response is None:
-                    st.error("Failed to generate SQL query. The model returned no response.")
-                    return
-                
-                sql_query = extract_sql_code(sql_response)
-                if not sql_query:
-                    st.error("Failed to extract valid SQL query from the response.")
-                    return
-                
-                # Log the query for debugging
-                #st.debug(f"Generated SQL query: {sql_query}")
-                
+            # Process the question with a spinner
+            with st.spinner("Thinking..."):
                 try:
-                    # Execute query and get results
-                    df = pd.read_sql(sql_query, st.session_state.db_connection)
+                    # Create database utility
+                    db = SQLDatabase.from_uri(st.session_state.db_connection.url)
+                    sql_generator = create_sql_query_chain(llm=llm, db=db, k=int(1e7))
+                    
+                    # Generate SQL query
+                    sql_response = sql_generator.invoke({"question": prompt})
+                    if sql_response is None:
+                        st.error("Failed to generate SQL query. The model returned no response.")
+                        return
+                    
+                    sql_query = extract_sql_code(sql_response)
+                    if not sql_query:
+                        st.error("Failed to extract valid SQL query from the response.")
+                        return
+                    
+                    # Log the query for debugging
+                    #st.debug(f"Generated SQL query: {sql_query}")
+                    
+                    try:
+                        # Execute query and get results
+                        df = pd.read_sql(sql_query, st.session_state.db_connection)
+                    except Exception as e:
+                        st.error(f"Error executing SQL query: {str(e)}")
+                        st.code(sql_query, language="sql")  # Show the problematic query
+                        return
+                    
+                    # Generate chart
+                    chart_analysis = analyze_chart_question(prompt, df, llm)
+                    chart = generate_chart(df, chart_analysis)
+                    
+                    # Add assistant response to chat
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": "Here's the result of your query:",
+                        "sql": sql_query.strip(),
+                        "data": df,
+                        "chart": chart
+                    })
+                    
+                    st.rerun()
+                    
                 except Exception as e:
-                    st.error(f"Error executing SQL query: {str(e)}")
-                    st.code(sql_query, language="sql")  # Show the problematic query
-                    return
-                
-                # Generate chart
-                chart_analysis = analyze_chart_question(prompt, df, llm)
-                chart = generate_chart(df, chart_analysis)
-                
-                # Add assistant response to chat
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": "Here's is the result to your query:",
-                    "sql": sql_query.strip(),
-                    "data": df,
-                    "chart": chart
-                })
-                
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"Error processing question: {str(e)}")
+                    st.error(f"Error processing question: {str(e)}")
 
 if __name__ == "__main__":
     main()
