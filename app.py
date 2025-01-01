@@ -59,7 +59,7 @@ def extract_sql_code(response):
     sql_code = ' '.join(sql_code.split())  # Split by whitespace and join with a single space
 
     # Replace single '%' with '%%'
-    sql_code = sql_code.replace('%', '%%')
+    sql_code = sql_code.replace('%%', '%')
 
     # Remove any trailing backticks or other unwanted characters
     sql_code = sql_code.rstrip('` ')  # Remove trailing backticks and spaces
@@ -135,7 +135,7 @@ def main():
     if not st.session_state.connected:
         st.subheader("Database Connection")
         connection_string = st.text_input(
-            "Enter your MySQL connection string:",
+            "Enter your database connection string:",
             placeholder="mysql+pymysql://username:password@host:port/database"
         )
         

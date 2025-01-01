@@ -1,0 +1,49 @@
+---
+title: "Chat History Report"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M:%S')`"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 2
+params:
+  messages: NULL
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(DT)
+library(plotly)
+library(webshot)
+```
+
+# Chat History
+
+```{r results='asis'}
+for(msg in params$messages) {
+  cat("\n\n## ", if(msg$role == "user") "User Question" else "Assistant Response", "\n\n")
+  cat(msg$content, "\n\n")
+  
+  if(!is.null(msg$sql)) {
+    cat("### SQL Query\n\n")
+    cat("```sql\n")
+    cat(msg$sql)
+    cat("\n```\n\n")
+  }
+  
+  if(!is.null(msg$data)) {
+    cat("### Data Table\n\n")
+    print(kable(msg$data))
+    cat("\n\n")
+  }
+  
+  if(!is.null(msg$plot)) {
+    cat("### Visualization\n\n")
+    temp_file <- tempfile(fileext = ".png")
+    export(msg$plot, file = temp_file)
+    cat(sprintf("![Plot](%s)\n\n", temp_file))
+  }
+  
+  cat("---\n\n")
+}
+```
