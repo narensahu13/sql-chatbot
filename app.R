@@ -14,6 +14,126 @@ library(DT)
 library(htmltools)
 library(rmarkdown)
 library(webshot) # Add this for PDF export
+library(shinyjs)
+library(sodium) # For password hashing
+library(RSQLite)  # Changed from RMySQL
+
+# Initialize SQLite database
+initialize_database <- function() {
+  # Create database connection
+  db_path <- "chat_app.sqlite"
+  conn <- dbConnect(RSQLite::SQLite(), db_path)
+  
+  # Check if tables exist and create them if they don't
+  if (!dbExistsTable(conn, "users")) {
+    dbExecute(conn, "
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    ")
+  }
+  
+  if (!dbExistsTable(conn, "chat_history")) {
+    dbExecute(conn, "
+      CREATE TABLE chat_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        sql_query TEXT,
+        data_json TEXT,
+        plot_json TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      )
+    ")
+  }
+  
+  # Create indices for better performance
+  dbExecute(conn, "CREATE INDEX IF NOT EXISTS idx_chat_user_id ON chat_history(user_id)")
+  dbExecute(conn, "CREATE INDEX IF NOT EXISTS idx_username ON users(username)")
+  
+  return(conn)
+}
+
+# Helper function to save chat message
+save_chat_message <- function(rv, message) {
+  if (!is.null(rv$user_id)) {
+    data_json <- NULL
+    plot_json <- NULL
+    
+    if (!is.null(message$data)) {
+      data_json <- toJSON(message$data)
+    }
+    if (!is.null(message$plot)) {
+      plot_json <- toJSON(message$plot)
+    }
+    
+    # Debugging: Check the values before saving
+    print("Saving message:")
+    print(message)
+    
+    query <- sprintf(
+      "INSERT INTO chat_history (user_id, role, content, sql_query, data_json, plot_json) 
+         VALUES (%d, '%s', '%s', %s, %s, %s)",
+      rv$user_id,
+      message$role,
+      message$content,
+      ifelse(is.null(message$sql), "NULL", sprintf("'%s'", message$sql)),
+      ifelse(is.null(data_json), "NULL", sprintf("'%s'", data_json)),
+      ifelse(is.null(plot_json), "NULL", sprintf("'%s'", plot_json))
+    )
+    
+    dbExecute(rv$conn_db, query)
+  }
+}
+
+# Helper function to load chat history
+load_chat_history <- function(rv) {
+  if (!is.null(rv$user_id)) {
+    query <- sprintf(
+      "SELECT * FROM chat_history WHERE user_id = %d ORDER BY timestamp",
+      rv$user_id
+    )
+    
+    history <- dbGetQuery(rv$conn_db, query)
+    
+    # Debugging: Check the retrieved history
+    print("Retrieved chat history:")
+    print(history)
+    
+    rv$messages <- lapply(seq_len(nrow(history)), function(i) {
+      row <- history[i, ]
+      message <- list(
+        role = row$role,
+        content = row$content,
+        timestamp = row$timestamp
+      )
+      
+      if (!is.na(row$sql_query)) {
+        message$sql <- row$sql_query
+      }
+      if (!is.na(row$data_json)) {
+        message$data <- fromJSON(row$data_json)
+      }
+      if (!is.na(row$plot_json)) {
+        message$plot <- fromJSON(row$plot_json)
+      }
+      
+      # Handle potential NA values in timestamp
+      if (!is.null(message$timestamp)) {
+        message$timestamp <- format(as.POSIXct(message$timestamp), "%Y-%m-%d %H:%M:%S")
+      } else {
+        message$timestamp <- "Unknown time"
+      }
+      
+      return(message)
+    })
+  }
+}
 
 # Load OpenAI API key
 credentials <- yaml::read_yaml("credentials.yml")
@@ -137,8 +257,19 @@ determine_chart_type <- function(question, data) {
 
 # UI definition
 ui <- fluidPage(
+  useShinyjs(),
   tags$head(
     tags$style(HTML("
+        .login-panel {
+        max-width: 400px;
+        margin: 50px auto;
+        padding: 20px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+      }
+      .login-tabs {
+        margin-bottom: 20px;
+      }
       .thinking-spinner {
         color: #666;
         font-style: italic;
@@ -177,41 +308,71 @@ ui <- fluidPage(
       }
     "))
   ),
-  titlePanel("Database Query Assistant"),
-  
-  sidebarLayout(
-    sidebarPanel(
-      # Database connection inputs
-      textInput("host", "Host:", "178.62.193.245"),
-      textInput("port", "Port:", "3306"),
-      textInput("dbname", "Database:", "personale_ghi"),
-      textInput("user", "Username:", "margino_dev"),
-      passwordInput("password", "Password:", "h2tJuV3FnrnN8BsM"),
-      actionButton("connect", "Connect to Database", class = "btn-primary"),
-      hr(),
-      # Connection status
-      verbatimTextOutput("connection_status"),
-      div(
-        class = "export-buttons",
-        downloadButton("export_chat_html", "Export Chat History as HTML")
-        #downloadButton("export_chat_pdf", "Export Chat History as PDF")
+  div(
+    id = "login_panel",
+    class = "login-panel",
+    tabsetPanel(
+      id = "auth_tabs",
+      tabPanel("Login",
+               textInput("login_username", "Username"),
+               passwordInput("login_password", "Password"),
+               actionButton("login_button", "Login", class = "btn-primary"),
+               div(id = "login_error", style = "color: red;")
       ),
-      width = 3
-    ),
-    
-    mainPanel(
-      conditionalPanel(
-        condition = "output.is_connected == true",
-        fluidRow(
-          column(12,
-            textInput("question", "", placeholder = "Ask a question about your data", width = '100%'),
-            actionButton("send", "Send", class = "btn-primary"),
-            div(
-              style = "height: 680px; overflow-y: auto; border: 1px solid #ccc; padding: 1px; margin-bottom: 1px; width: 100%",
-              id = "chat_history",
-              uiOutput("chat_messages")
-            ),
-            uiOutput("thinking_spinner")
+      tabPanel("Register",
+               textInput("register_username", "Username"),
+               passwordInput("register_password", "Password"),
+               passwordInput("register_password_confirm", "Confirm Password"),
+               actionButton("register_button", "Register", class = "btn-primary"),
+               div(id = "register_error", style = "color: red;")
+      )
+    )
+  ),
+  hidden(
+    div(
+      id = "main_app",
+      titlePanel("Database Query Assistant"),
+      div(
+        style = "text-align: right;",
+        textOutput("user_display"),
+        actionButton("logout_button", "Logout", class = "btn-default")
+      ),
+      
+      sidebarLayout(
+        sidebarPanel(
+          # Database connection inputs
+          textInput("host", "Host:", "178.62.193.245"),
+          textInput("port", "Port:", "3306"),
+          textInput("dbname", "Database:", "personale_ghi"),
+          textInput("user", "Username:", "margino_dev"),
+          passwordInput("password", "Password:", "h2tJuV3FnrnN8BsM"),
+          actionButton("connect", "Connect to Database", class = "btn-primary"),
+          hr(),
+          # Connection status
+          verbatimTextOutput("connection_status"),
+          div(
+            class = "export-buttons",
+            downloadButton("export_chat_html", "Export Chat History as HTML")
+            #downloadButton("export_chat_pdf", "Export Chat History as PDF")
+          ),
+          width = 3
+        ),
+        
+        mainPanel(
+          conditionalPanel(
+            condition = "output.is_connected == true",
+            fluidRow(
+              column(12,
+                     textInput("question", "", placeholder = "Ask a question about your data", width = '100%'),
+                     actionButton("send", "Send", class = "btn-primary"),
+                     div(
+                       style = "height: 680px; overflow-y: auto; border: 1px solid #ccc; padding: 1px; margin-bottom: 1px; width: 100%",
+                       id = "chat_history",
+                       uiOutput("chat_messages")
+                     ),
+                     uiOutput("thinking_spinner")
+              )
+            )
           )
         )
       )
@@ -225,10 +386,113 @@ server <- function(input, output, session) {
   # Reactive values
   rv <- reactiveValues(
     conn = NULL,
+    conn_db = NULL,
     messages = list(),
     is_connected = FALSE,
-    db_schema = NULL
+    db_schema = NULL,
+    user_id = NULL,
+    username = NULL
   )
+  
+  # Initialize database connection when the app starts
+  observe({
+    if (is.null(rv$conn_db)) {
+      rv$conn_db <- initialize_database()
+    }
+  })
+  
+  # Helper function to hash passwords
+  hash_password <- function(password) {
+    password_hash <- sodium::password_store(password)
+    return(password_hash)
+  }
+  
+  # Helper function to verify passwords
+  verify_password <- function(password, hash) {
+    sodium::password_verify(hash, password)
+  }
+  
+  # Login handler
+  observeEvent(input$login_button, {
+    req(input$login_username, input$login_password)
+    
+    query <- sprintf(
+      "SELECT id, password_hash FROM users WHERE username = '%s'",
+      input$login_username
+    )
+    
+    result <- dbGetQuery(rv$conn_db, query)
+    
+    if (nrow(result) == 1 && verify_password(input$login_password, result$password_hash)) {
+      rv$user_id <- result$id
+      rv$username <- input$login_username
+      
+      # Load chat history
+      load_chat_history(rv)
+      
+      # Debugging: Check if messages are loaded
+      print("Loaded messages:")
+      print(rv$messages)
+      
+      # Hide login panel and show main app
+      hide("login_panel")
+      show("main_app")
+      
+      # Debugging: Check if main_app is shown
+      print("Main app should now be visible.")
+      
+      # Additional check to confirm visibility
+      shinyjs::show("main_app")
+    } else {
+      updateTextInput(session, "login_error", value = "Invalid username or password")
+    }
+  })
+  
+  # Register handler
+  observeEvent(input$register_button, {
+    req(input$register_username, input$register_password, input$register_password_confirm)
+    
+    if (input$register_password != input$register_password_confirm) {
+      updateTextInput(session, "register_error", value = "Passwords do not match")
+      return()
+    }
+    
+    password_hash <- hash_password(input$register_password)
+    
+    tryCatch({
+      query <- sprintf(
+        "INSERT INTO users (username, password_hash) VALUES ('%s', '%s')",
+        input$register_username,
+        password_hash
+      )
+      
+      dbExecute(rv$conn_db, query)
+      
+      # Switch to login tab
+      updateTabsetPanel(session, "auth_tabs", selected = "Login")
+      updateTextInput(session, "register_error", value = "Registration successful! Please login.")
+    }, error = function(e) {
+      updateTextInput(session, "register_error", value = "Username already exists")
+    })
+  })
+  
+  # Logout handler
+  observeEvent(input$logout_button, {
+    rv$user_id <- NULL
+    rv$username <- NULL
+    rv$messages <- list()
+    
+    # Show login panel and hide main app
+    show("login_panel")
+    hide("main_app")
+  })
+  
+  # Display username
+  output$user_display <- renderText({
+    if (!is.null(rv$username)) {
+      paste("Logged in as:", rv$username)
+    }
+  })
   
   # Database connection
   observeEvent(input$connect, {
@@ -280,13 +544,18 @@ server <- function(input, output, session) {
   # Handle chat messages
   observeEvent(input$send, {
     req(rv$conn, input$question)
+    req(rv$conn_db, rv$user_id)
     
     # Add user message
-    rv$messages[[length(rv$messages) + 1]] <- list(
+    message <- list(
       role = "user",
       content = input$question,
       timestamp = Sys.time()
     )
+    
+    # Add user message
+    rv$messages[[length(rv$messages) + 1]] <- message
+    save_chat_message(rv, message)
     
     # Clear previous data for the current message
     rv$messages[[length(rv$messages)]]$data <- NULL
@@ -352,6 +621,9 @@ server <- function(input, output, session) {
         datatable = datatable_obj,
         timestamp = Sys.time()
       )
+      
+      # Save the assistant message
+      save_chat_message(rv, rv$messages[[length(rv$messages)]])
       
     }, error = function(e) {
       rv$messages[[length(rv$messages) + 1]] <- list(
@@ -496,6 +768,15 @@ server <- function(input, output, session) {
       }
     })
   })
+  
+  # observe({
+  #   session$onSessionEnded(function() {
+  #     if (!is.null(rv$conn_db)) {
+  #       dbDisconnect(rv$conn_db)
+  #     }
+  #   })
+  # })
+  
 }
 
 # Run the app
