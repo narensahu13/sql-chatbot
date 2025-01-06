@@ -64,7 +64,6 @@ save_chat_message <- function(rv, message) {
   if (!is.null(rv$user_id)) {
     data_json <- NULL
     plot_json <- NULL
-    
     if (!is.null(message$data)) {
       data_json <- toJSON(message$data)
     }
@@ -73,8 +72,6 @@ save_chat_message <- function(rv, message) {
     }
     
     # Debugging: Check the values before saving
-    print("Saving message:")
-    print(message)
     
     query <- sprintf(
       "INSERT INTO chat_history (user_id, role, content, sql_query, data_json, plot_json) 
@@ -86,7 +83,6 @@ save_chat_message <- function(rv, message) {
       ifelse(is.null(data_json), "NULL", sprintf("'%s'", data_json)),
       ifelse(is.null(plot_json), "NULL", sprintf("'%s'", plot_json))
     )
-    
     dbExecute(rv$conn_db, query)
   }
 }
@@ -102,8 +98,6 @@ load_chat_history <- function(rv) {
     history <- dbGetQuery(rv$conn_db, query)
     
     # Debugging: Check the retrieved history
-    print("Retrieved chat history:")
-    print(history)
     
     rv$messages <- lapply(seq_len(nrow(history)), function(i) {
       row <- history[i, ]
@@ -124,7 +118,7 @@ load_chat_history <- function(rv) {
       }
       
       # Handle potential NA values in timestamp
-      if (!is.null(message$timestamp)) {
+      if (!is.null(message$timestamp) && !is.na(message$timestamp)) {
         message$timestamp <- format(as.POSIXct(message$timestamp), "%Y-%m-%d %H:%M:%S")
       } else {
         message$timestamp <- "Unknown time"
@@ -431,19 +425,15 @@ server <- function(input, output, session) {
       load_chat_history(rv)
       
       # Debugging: Check if messages are loaded
-      print("Loaded messages:")
-      print(rv$messages)
       
       # Hide login panel and show main app
       hide("login_panel")
       show("main_app")
       
-      # Debugging: Check if main_app is shown
-      print("Main app should now be visible.")
-      
       # Additional check to confirm visibility
       shinyjs::show("main_app")
     } else {
+      shinyjs::alert("Invalid username or password")
       updateTextInput(session, "login_error", value = "Invalid username or password")
     }
   })
@@ -667,7 +657,7 @@ server <- function(input, output, session) {
           },
           div(
             style = "color: #666; font-size: 0.8em; margin-top: 5px;",
-            format(msg$timestamp, "%Y-%m-%d %H:%M:%S")
+            msg$timestamp
           )
         )
       })
